@@ -20,6 +20,5 @@
 
 
 assumptions - 
-1. eavesdroppers knwo the CSI. we also check the case that we dont know their CSI 
-2. initial velocities of the registered cmm users is known to the BS
+1. initial velocities of the registered cmm users is known to the BS
 
