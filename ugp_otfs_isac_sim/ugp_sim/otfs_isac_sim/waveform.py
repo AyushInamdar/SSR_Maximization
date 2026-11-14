@@ -17,6 +17,8 @@ Two levels:
 """
 from __future__ import annotations
 
+import functools
+
 import numpy as np
 
 from .config import SimParams
@@ -74,6 +76,38 @@ def dd_channel(s: np.ndarray, gain: complex, delay_samples: int, nu: float,
 
 def qpsk(shape, rng: np.random.Generator) -> np.ndarray:
     return ((rng.integers(0, 2, shape) * 2 - 1) + 1j * (rng.integers(0, 2, shape) * 2 - 1)) / np.sqrt(2)
+
+
+@functools.lru_cache(maxsize=16)
+def _probe_waveform(N: int, M: int, seed: int) -> np.ndarray:
+    s = otfs_modulate(qpsk((N, M), np.random.default_rng(seed)))
+    s.setflags(write=False)
+    return s
+
+
+def bandlimited_shift(s: np.ndarray, fs: float, gamma: float) -> np.ndarray:
+    """s(t - gamma) on the sample grid, for one period of a band-limited signal
+    (fractional delays by a frequency-domain phase ramp; Nyquist bin split symmetrically)."""
+    L = s.size
+    S = np.fft.fft(s)
+    f = np.fft.fftfreq(L, 1.0 / fs)
+    ph = np.exp(-1j * 2 * np.pi * f * gamma)
+    if L % 2 == 0:
+        ph[L // 2] = np.cos(np.pi * fs * gamma)
+    return np.fft.ifft(S * ph)
+
+
+def probe_waveform(p: SimParams, seed: int = 0) -> np.ndarray:
+    """The sensing waveform s0(t) used for the CRB (Draft Sec. III / Appendix A):
+    one OTFS frame with unit-energy-per-symbol QPSK in the DD domain, rectangular
+    pulses, N*M complex samples at fs = M*delta_f, duration N*T. sum|s|^2 = M*N
+    (= Gm, the matched-filter gain). The ortho-normalised (ISFFT, Heisenberg) pair
+    preserves energy, so the mean sample power is 1.
+
+    The samples are read as ONE PERIOD of a band-limited signal occupying
+    [-fs/2, fs/2) (frame-level CP convention of `dd_channel`); the tone at m = M/2
+    sits on the band edge and is split symmetrically between -fs/2 and +fs/2."""
+    return _probe_waveform(p.N, p.M, seed)
 
 
 def measure_ofdm_sinr_loss(nu: float, p: SimParams, rng=None) -> float:

@@ -19,11 +19,12 @@ Solver interface:  solve(prob: Problem) -> Solution.   Register with @register.
   name             what it is                                          status
   ---------------  --------------------------------------------------  ----------
   mrt_no_an        draft beams, equal power, no AN                      baseline
-  mrt_crude_an     draft beams + crude AN at full AN budget             baseline
-  zf_crude_an      ZF beams + crude AN at full AN budget                baseline
-  isotropic_an     MRT + isotropic null-space AN (no Eve CSI)           baseline
-  grid_split       1-D search of AN fraction x {MRT, ZF}                heuristic
-  slsqp            local NLP (SciPy SLSQP) over (p, q), smoothed obj.  heuristic
+  mrt_an           MRT beams + Eve-region null-space AN, full AN budget baseline
+  zf_an            ZF beams + Eve-region null-space AN, full AN budget  baseline
+  isotropic_an     MRT + isotropic null-space AN (Su Sec. III, no Eve)  baseline
+  grid_split       MAIN: search of AN fraction x iso share x {MRT, ZF}  heuristic
+  slsqp            refinement: SciPy SLSQP over (p, q), warm-started   refinement
+                   from grid_split (never worse than its warm start)
   sca_sdr          SDR/SCA on full F, S (needs cvxpy)                   STUB
   drl              DDPG/SAC agent                                       STUB
 """
@@ -37,7 +38,7 @@ from scipy.optimize import minimize
 from .config import SimParams
 from .geometry import steering
 from .waveform import effective_sinr
-from .an import ANBasis, crude_an_allocation, isotropic_null_an
+from .an import ANBasis, an_allocation, isotropic_null_an
 
 SOLVERS: dict = {}
 
@@ -108,7 +109,7 @@ class LinearModel:
 
     def __init__(self, prob: Problem, W: np.ndarray, S_fixed: np.ndarray | None = None):
         self.prob, self.W = prob, W
-        D = prob.basis.dirs
+        basis = prob.basis
         Nt = prob.Nt
         S0 = np.zeros((Nt, Nt), complex) if S_fixed is None else S_fixed
         self.S_fixed = S0
@@ -116,7 +117,7 @@ class LinearModel:
         def blocks(th, h2=None):
             A = steering(th, Nt)
             g = np.abs(A.conj().T @ W) ** 2
-            l = np.abs(A.conj().T @ D) ** 2 if D.shape[1] else np.zeros((len(th), 0))
+            l = basis.gains(A)
             c = np.real(np.einsum("ip,ij,jp->p", A.conj(), S0, A))
             if h2 is not None:
                 g, l, c = g * h2[:, None], l * h2[:, None], c * h2
@@ -192,7 +193,7 @@ def _equal_split(prob, mode, an_frac, name, t0):
     P = prob.p
     W = directions(prob, mode)
     P_an = min(an_frac * P.P_max, P.P_an_max) if prob.basis.n else 0.0
-    q = crude_an_allocation(prob.basis, P_an, "per_eve")
+    q = an_allocation(prob.basis, P_an, iso_frac=0.0, mode="per_eve")
     p = np.full(prob.K, (P.P_max - P_an) / prob.K)
     return _finish(prob, W, p, q, name, t0=t0)
 
@@ -202,14 +203,14 @@ def solve_mrt_no_an(prob: Problem) -> Solution:
     return _equal_split(prob, "mrt", 0.0, "mrt_no_an", time.perf_counter())
 
 
-@register("mrt_crude_an")
-def solve_mrt_crude_an(prob: Problem) -> Solution:
-    return _equal_split(prob, "mrt", prob.p.P_an_max_frac, "mrt_crude_an", time.perf_counter())
+@register("mrt_an")
+def solve_mrt_an(prob: Problem) -> Solution:
+    return _equal_split(prob, "mrt", prob.p.P_an_max_frac, "mrt_an", time.perf_counter())
 
 
-@register("zf_crude_an")
-def solve_zf_crude_an(prob: Problem) -> Solution:
-    return _equal_split(prob, "zf", prob.p.P_an_max_frac, "zf_crude_an", time.perf_counter())
+@register("zf_an")
+def solve_zf_an(prob: Problem) -> Solution:
+    return _equal_split(prob, "zf", prob.p.P_an_max_frac, "zf_an", time.perf_counter())
 
 
 @register("isotropic_an")
@@ -217,7 +218,7 @@ def solve_isotropic_an(prob: Problem) -> Solution:
     t0 = time.perf_counter()
     P = prob.p
     W = directions(prob, "mrt")
-    S_iso = isotropic_null_an(prob.th_u, prob.Nt, P.P_an_max)
+    S_iso = isotropic_null_an(prob.th_u, prob.Nt, P.P_an_max, P.an_deriv_null)
     p = np.full(prob.K, (P.P_max - P.P_an_max) / prob.K)
     q = np.zeros(prob.basis.n)
     return _finish(prob, W, p, q, "isotropic_an", S_fixed=S_iso, t0=t0)
@@ -226,23 +227,28 @@ def solve_isotropic_an(prob: Problem) -> Solution:
 # ---------------------------------------------------------------- heuristics --
 @register("grid_split")
 def solve_grid_split(prob: Problem, n_grid: int = 11) -> Solution:
-    """Search the AN power fraction rho in [0, P_AN_max/P_max] and beam type;
-    pick max predicted objective among least-violating candidates."""
+    """MAIN solver. Search the AN power fraction rho in [0, P_AN_max/P_max], the share
+    iota of the AN power put on the isotropic null-space atom (rest on the Eve-region
+    atoms, an.an_allocation) and the beam type {MRT, ZF}; equal user powers; pick the
+    max predicted objective among the least-violating candidates."""
     t0 = time.perf_counter()
     P = prob.p
     best = None
+    iotas = P.an_iso_grid if prob.basis.has_iso else (0.0,)
     for mode in ("mrt", "zf"):
         W = directions(prob, mode)
         lm = LinearModel(prob, W)
         for rho in np.linspace(0, P.P_an_max_frac, n_grid):
             P_an = rho * P.P_max if prob.basis.n else 0.0
-            q = crude_an_allocation(prob.basis, P_an, "per_eve")
-            p = np.full(prob.K, (P.P_max - P_an) / prob.K)
-            score = (-lm.violation(p, q), lm.objective(p, q))
-            if best is None or score > best[0]:
-                best = (score, W, p, q, lm, mode, rho)
-    _, W, p, q, lm, mode, rho = best
-    return _finish(prob, W, p, q, "grid_split", lm=lm, t0=t0, beam=mode, rho=float(rho))
+            for iota in (iotas if P_an > 0 else (0.0,)):
+                q = an_allocation(prob.basis, P_an, iota, "per_eve")
+                p = np.full(prob.K, (P.P_max - P_an) / prob.K)
+                score = (-lm.violation(p, q), lm.objective(p, q))
+                if best is None or score > best[0]:
+                    best = (score, W, p, q, lm, mode, rho, iota)
+    _, W, p, q, lm, mode, rho, iota = best
+    return _finish(prob, W, p, q, "grid_split", lm=lm, t0=t0, beam=mode, rho=float(rho),
+                   iso_frac=float(iota))
 
 
 @register("slsqp")
