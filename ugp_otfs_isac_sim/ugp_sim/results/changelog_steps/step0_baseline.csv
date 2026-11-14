@@ -1,0 +1,5 @@
+label,framework,n_seeds,frames,sum_sec_mean,sum_sec_std,sum_rate_mean
+step0_baseline,otfs_isac,3,60,55.1838,0.5813,55.8365
+step0_baseline,ofdm_isac,3,60,39.9685,0.6175,40.3976
+step0_baseline,otfs_feedback,3,60,36.8603,0.1656,37.4188
+step0_baseline,otfs_perfect,3,60,55.4455,0.4572,56.0989

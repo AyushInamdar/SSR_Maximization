@@ -13,8 +13,23 @@ from __future__ import annotations
 import functools
 import warnings
 
+import contextlib
+
 DRAFT_ITEMS: dict[str, str] = {}
 _USED: set[str] = set()
+_ACTIVE: list[set] = []
+
+
+@contextlib.contextmanager
+def track():
+    """Collect the tags of every placeholder touched inside the block (used per run so
+    that a figure is stamped only if the runs behind it used a placeholder)."""
+    box: set = set()
+    _ACTIVE.append(box)
+    try:
+        yield box
+    finally:
+        _ACTIVE.remove(box)
 
 
 class DraftWarning(UserWarning):
@@ -23,6 +38,8 @@ class DraftWarning(UserWarning):
 
 def draft_notice(tag: str, message: str) -> None:
     DRAFT_ITEMS.setdefault(tag, message)
+    for box in _ACTIVE:
+        box.add(tag)
     if tag not in _USED:
         _USED.add(tag)
         warnings.warn(f"[DRAFT:{tag}] {message}", DraftWarning, stacklevel=3)

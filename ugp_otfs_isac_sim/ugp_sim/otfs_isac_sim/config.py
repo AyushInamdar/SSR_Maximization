@@ -50,21 +50,32 @@ class SimParams:
     speed_process_std: float = 0.15     # m/s random walk per time instant (manoeuvres)
     rcs: float = 1.0                    # xi in beta = xi / (2 d)   (Draft Sec. VI)
     Gm: float | None = None             # MF gain; None -> M*N (energy of s_i, unit symbols)
-    P_max_dBm: float = 0.0              # total BS transmit power budget (sets link SNR; tune)
+    P_max_dBm: float = -30.0            # total BS transmit power budget (sets link SNR). -30 dBm gives ~13 dB
+                                        # mean per-user SNR / ~4 bit/s/Hz per user (was 0 dBm: ~43 dB, 14 bit/s/Hz;
+                                        # see results/sanity_pmax_sweep.csv)
     P_an_max_frac: float = 0.3          # NEW: AN power budget as fraction of P_max
-    P_probe_dBm: float = 0.0            # isotropic sensing probe power
+    P_probe_dBm: float | None = None    # isotropic sensing probe power; None -> equal to P_max
     noise_figure_dB: float = 9.0        # receiver NF (users and Eves)
     pathloss_model: str = "friis"       # "friis": |h|^2=(c/4 pi fc d)^2 ; "draft": c/(4 pi fc d^2)
     R_min: float = 0.5                  # bits/s/Hz per user QoS
-    gamma_sens_dBm: float = 0.0         # min beampattern gain a^H R a toward every target
+    gamma_sens_dBm: float | None = None  # min beampattern gain a^H R a toward every target; None -> P_max
+                                        # (i.e. at least the isotropic level; scales with P_max)
     # CRB requirement C_j^req on eta_j = [gamma (s), omega (Hz), theta (rad)]
     crb_req_range_m: float = 0.5        # -> std(gamma) <= 2*0.5/c
     crb_req_doppler_hz: float = 5.0
     crb_req_theta_deg: float = 0.5
     eps_conf: float = 7.815             # chi^2_3 95% -> ellipsoid E_j size
+    crb_moments: str = "waveform"       # CRB pulse moments: "waveform" (actual OTFS frame) | "flat" (old approx.)
+    crb_waveform_seed: int = 0          # QPSK realisation of the OTFS frame used for the moments
+    track_accumulate: bool = True       # fuse information over frames (information filter, Report Sec. VI-B)
+    track_q_scale: float = 1.0          # scales the motion-model process noise Q of the filter
+    an_iso_grid: tuple = (0.0, 0.5, 1.0)   # grid_split: share of AN power on the isotropic null-space atom
+    an_with_iso: bool = True            # include the isotropic atom (R_nbar = ... + q0 I) in the AN basis
+    an_deriv_null: bool = False         # also null da/dtheta of the users (leakage O(delta^4))
     n_unc_samples: int = 6              # boundary samples per uncertainty region
     theta_search_halfwidth: float = 0.15    # rad, ML search window around prediction
     theta_grid_res: float = 2e-4            # rad
+    ml_angle_interp: bool = True            # parabolic refinement of the ML angle grid peak
     feedback_overhead: float = 0.10     # pilot + feedback fraction (feedback benchmark)
     feedback_codebook_oversample: int = 2   # DFT codebook of oversample*Nt beams (feedback)
     seed: int = 0
@@ -111,7 +122,7 @@ class SimParams:
 
     @property
     def P_probe(self) -> float:
-        return dbm_to_w(self.P_probe_dBm)
+        return self.P_max if self.P_probe_dBm is None else dbm_to_w(self.P_probe_dBm)
 
     @property
     def N0(self) -> float:
@@ -120,7 +131,7 @@ class SimParams:
 
     @property
     def gamma_sens(self) -> float:
-        return dbm_to_w(self.gamma_sens_dBm)
+        return self.P_max if self.gamma_sens_dBm is None else dbm_to_w(self.gamma_sens_dBm)
 
     @property
     def crb_req(self) -> np.ndarray:
@@ -162,7 +173,9 @@ PARAM_SOURCES = {
     "pathloss_model": "ASSUMED (draft formula available)", "R_min": "ASSUMED",
     "gamma_sens_dBm": "ASSUMED", "crb_req_range_m": "ASSUMED",
     "crb_req_doppler_hz": "ASSUMED", "crb_req_theta_deg": "ASSUMED",
-    "eps_conf": "ASSUMED (chi2_3, 95%)", "n_unc_samples": "ASSUMED",
-    "theta_search_halfwidth": "ASSUMED", "theta_grid_res": "ASSUMED",
+    "eps_conf": "ASSUMED (chi2_3, 95%)", "crb_moments": "Report App. A (waveform moments)",
+    "crb_waveform_seed": "-", "track_accumulate": "Report Sec. VI-B (refine C_j over frames)",
+    "track_q_scale": "ASSUMED (Q derived from speed_process_std)", "n_unc_samples": "ASSUMED", "an_iso_grid": "ASSUMED (search grid)", "an_with_iso": "Su et al. 2210.08286 Sec. III-A", "an_deriv_null": "ASSUMED (optional extension)",
+    "theta_search_halfwidth": "ASSUMED", "theta_grid_res": "ASSUMED", "ml_angle_interp": "ASSUMED (numerical refinement)",
     "feedback_overhead": "ASSUMED", "feedback_codebook_oversample": "ASSUMED", "seed": "-",
 }

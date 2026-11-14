@@ -5,16 +5,18 @@ Simulation environment for *Sum-Secrecy Rate Maximization in OTFS-Assisted ISAC*
 Transmission for Vehicular Networks*, arXiv:2105.03125, Sec. IV.
 
 ```
-pip install numpy scipy matplotlib          # cvxpy only needed for the sca_sdr stub
-python tests/test_core.py                   # 8 sanity checks
-python run_demo.py --frames 100 --seeds 0   # ~2 min, writes results/
+pip install numpy scipy matplotlib pytest   # cvxpy only needed for the sca_sdr stub
+python -m pytest tests -q                    # or: python tests/test_core.py
+python run_demo.py                           # 10 seeds, writes results/ (~15 min on 12 cores)
+python scripts/sanity_check.py               # per-user SNR/rate, P_max sweep, angular-crossing diagnostic
 ```
 
-> **DRAFT components.** The AN matrix formulation and the CRB matrix are crude
-> placeholders. They are marked with a `DRAFT / PLACEHOLDER` banner in the code,
-> raise a `DraftWarning` on first use, and every run ends with a report of the
-> placeholders it touched. All figures carry a "DRAFT MODELS" stamp. Search the
-> code for `DRAFT` and `TODO`.
+Every model change, with before/after numbers, is listed in [CHANGELOG.md](CHANGELOG.md);
+the experiments and the exact reproduction command are in [results/README.md](results/README.md).
+
+> **Placeholders.** Remaining placeholders (stylised feedback benchmark, OFDM sensing reusing the
+> OTFS CRB, `sca_sdr`/`drl` stubs) are registered in `draft.py`; a figure is stamped "DRAFT" only if
+> a run behind it used one. Search the code for `DRAFT` and `TODO`.
 
 ## Layout
 
@@ -23,12 +25,12 @@ python run_demo.py --frames 100 --seeds 0   # ~2 min, writes results/
 | `config.py` | `SimParams`; every value tagged Yuan21 / Draft / ASSUMED (`PARAM_SOURCES`) | ready |
 | `geometry.py` | road, kinematics, ULA steering, path loss (Friis or draft formula) | ready |
 | `waveform.py` | ISFFT/SFFT, Heisenberg/Wigner, DD channel, OTFS + OFDM link level; system-level Doppler/ICI and CP-overhead abstraction | ready |
-| `sensing.py` | echo model, ML angle search, localisation, speed, prediction; feedback benchmark | DD estimator is a shortcut (DRAFT) |
-| `crb.py` | crude diagonal FIM/CRB, ellipsoid E_j sampling, CRB → min-illumination | **DRAFT** |
-| `an.py` | null-space projector, AN basis, S, AN power, heuristic allocations | **DRAFT** |
-| `metrics.py` | true-geometry rates, Eve rates, secrecy, beampattern | ready |
+| `sensing.py` | echo model, ML angle search, localisation, speed, prediction; feedback benchmark | ML angle (parabolic refinement), information-filter tracking; DD estimate drawn from N(truth, CRB) (efficient-estimator model, validated by test) |
+| `crb.py` | CRB of Report App. A Eq. (66) from the actual OTFS waveform moments, exact 5×5 FIM check, ellipsoid E_j, CRB → min-illumination | ready |
+| `an.py` | AN per Su et al. (2210.08286): S = V R_n̄ Vᴴ, V = null-space projector of the users; atoms, allocation | ready |
+| `metrics.py` | Eqs. (27)–(29): SINR_k, N_{j,k}, D_{j,k} (derived, not in the report), secrecy | ready (derived) |
 | `solvers.py` | `Problem`, linear model, constraint checks, solver registry | see below |
-| `frameworks.py` | OTFS-ISAC, OFDM-ISAC, OTFS-feedback, genie | ready (OFDM sensing reuses crude CRB) |
+| `frameworks.py` | OTFS-ISAC, OFDM-ISAC, OTFS-feedback, genie | OFDM sensing reuses the OTFS CRB (DRAFT); feedback benchmark stylised (DRAFT) |
 | `simulator.py` | time loop: predict → design → evaluate on truth → sense | ready |
 | `draft.py` | registry/warnings for placeholders | — |
 
@@ -40,7 +42,7 @@ max Σ_k [R_k − max_j max_{η∈E_j} R_{j,k}^Eve]^+ over F, q ≥ 0, subject t
 - **C2 tr(S) = Σ q_{j,m}‖ã_{j,m}‖² ≤ P_AN,max** — new AN budget (`P_an_max_frac`, default 30 % of P_max)
 - C3 R_k ≥ R_min
 - C4 aᴴ(θ_i)(Σ f fᴴ + S)a(θ_i) ≥ Γ_sens, ∀i ∈ K ∪ J
-- C5 I⁻¹(η_j) ≼ C_j^req — with the crude diagonal FIM this becomes a minimum
+- C5 I⁻¹(η_j) ≼ C_j^req — with the diagonal CRB of Eq. (66), every entry ∝ 1/illumination, so this is a minimum
   illumination toward each Eve (linear in the powers)
 
 All solvers use f_k = √p_k w_k (w_k = MRT, as in the draft, or ZF) and S over the
@@ -48,9 +50,9 @@ fixed AN basis, which keeps C1, C2, C4, C5 linear in (p, q).
 
 | Solver | Notes |
 |---|---|
-| `mrt_no_an`, `mrt_crude_an`, `zf_crude_an`, `isotropic_an` | baselines |
-| `grid_split` | 1-D search over AN fraction × {MRT, ZF} |
-| `slsqp` | SciPy SLSQP over (p, q), smoothed objective, C1–C5 imposed, warm start from grid |
+| `mrt_no_an`, `mrt_an`, `zf_an`, `isotropic_an` | baselines |
+| `grid_split` | **main solver**: search over AN fraction × isotropic share × {MRT, ZF} |
+| `slsqp` | refinement only: SciPy SLSQP over (p, q), warm-started from `grid_split`, never worse than it |
 | `sca_sdr`, `drl` | **stubs** — interface and plan in docstrings |
 
 Add a solver: write `def solve_x(prob) -> Solution` and decorate with `@register("x")`.
@@ -63,16 +65,9 @@ Add a solver: write `def solve_x(prob) -> Solution` and decorate with `@register
 4. **OTFS DD relation.** With rectangular pulses, y[k,l] = h·x[k−k_ν, l] carries an extra known phase e^{j2πl k_ν/(MN)}. It is power-neutral and compensable, but the draft equation omits it (verified in tests).
 5. **User SINR** includes AN leakage h_k² aᴴ(θ_k)S a(θ_k). This is zero only when the predicted and true angles coincide; the draft drops the term.
 6. **Path loss.** The draft/Yuan21 h² = c/(4πf_c d²) is not Friis; `pathloss_model="draft"` reproduces it, and the default is Friis.
-7. **Radar normalisation.** Echo SNR uses Yuan21's normalised model (σ² = 1) with illumination divided by P_max.
+7. **Radar normalisation.** Echo SNR uses Yuan21's normalised model (σ² = 1) with illumination divided by P_max; the resulting per-element radar SNR is very high (~30–50 dB), [ASSUMED] and worth revisiting.
+8. **Report Eq. (12)** writes h_k = (c/4πf_c d_k)², which is used here as the *power* gain |h_k|² (Friis); using it as an amplitude would square the path loss twice.
 
-## Results from the default run (100 instants, seed 0, provisional)
+## Results
 
-| Framework (grid_split) | mean sum secrecy (bit/s/Hz) |
-|---|---|
-| OTFS-ISAC | 54.7 |
-| OFDM-ISAC | 39.5 |
-| OTFS pilot feedback | 37.5 |
-| OTFS genie | 55.0 |
-
-Absolute rates are high because the link SNR is high at the assumed P_max = 0 dBm.
-The main knobs are `P_max_dBm` and `noise_figure_dB`.
+See [results/README.md](results/README.md) (10 seeds, mean ± std) and [CHANGELOG.md](CHANGELOG.md).
